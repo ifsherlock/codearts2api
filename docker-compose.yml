@@ -1,6 +1,7 @@
 services:
   codearts2api:
-    build: .
+    # 默认用 GHCR 预构建镜像；本地构建改为 build: . 并注释掉 image
+    image: ghcr.io/ifsherlock/codearts2api:latest
     container_name: codearts2api
     restart: unless-stopped
     ports:

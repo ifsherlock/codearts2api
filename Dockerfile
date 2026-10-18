@@ -1,12 +1,13 @@
 FROM golang:1.24-alpine AS build
 WORKDIR /src
+ENV CGO_ENABLED=0 GOOS=linux
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN go build -o /out/codearts2api ./cmd/server && \
-    go build -o /out/codearts2api-login ./cmd/login && \
-    go build -o /out/codearts2api-credit ./cmd/credit && \
-    go build -o /out/codearts2api-apply ./cmd/apply
+RUN go build -trimpath -ldflags="-s -w" -o /out/codearts2api ./cmd/server && \
+    go build -trimpath -ldflags="-s -w" -o /out/codearts2api-login ./cmd/login && \
+    go build -trimpath -ldflags="-s -w" -o /out/codearts2api-credit ./cmd/credit && \
+    go build -trimpath -ldflags="-s -w" -o /out/codearts2api-apply ./cmd/apply
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata

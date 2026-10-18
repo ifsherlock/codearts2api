@@ -142,11 +142,31 @@ sudo cp deploy/codearts2api.service /etc/systemd/system/
 # 编辑 /opt/codearts2api/.env 写 CA2A_API_KEY，改好 config.json
 sudo systemctl daemon-reload && sudo systemctl enable --now codearts2api
 
-# 或 Docker
+# 或 Docker（直接拉取 GHCR 预构建镜像，免本地构建）
 export CA2A_API_KEY=你的随机密钥
 mkdir -p auths data
-docker compose up -d --build
+docker compose up -d
+
+# 想本地构建则用：docker compose up -d --build
 ```
+
+### 预构建镜像（GHCR）
+
+推送到 `main` 或打 `v*` tag 时，GitHub Actions 会自动构建并推送多架构
+（`linux/amd64` + `linux/arm64`）镜像：
+
+```bash
+docker pull ghcr.io/ifsherlock/codearts2api:latest
+```
+
+标签规则：`latest`（默认分支）、分支名、`sha-<短哈希>`、`v1.2.3`。
+
+首次拉取若提示无权访问，把 package 可见性改成 Public（GitHub → Packages →
+codearts2api → Package settings → Change visibility），或本地 `docker login ghcr.io`
+用带 `read:packages` 的 token。
+
+> 镜像内不含任何账号凭据：`auths/`、`data/`、`config.json` 均由 compose 挂载
+> 宿主机目录，且 `.gitignore` / `.dockerignore` 已排除，不会进入镜像层。
 
 ## 环境变量配置
 

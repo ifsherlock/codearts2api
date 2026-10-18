@@ -11,8 +11,11 @@ import (
 	"time"
 )
 
-// Auth 单个账号凭证（登录 oauth2/tokens 返回）。
+const permanentRemaining time.Duration = 1<<63 - 1
+
+// Auth 单个账号凭证（OAuth 临时凭据或显式声明的永久 AK/SK）。
 type Auth struct {
+	AuthType        string `json:"auth_type,omitempty"`
 	UserID          string `json:"user_id"`
 	UserName        string `json:"user_name"`
 	DomainID        string `json:"domain_id"`
@@ -36,6 +39,26 @@ type Auth struct {
 
 	path string
 	mu   sync.Mutex
+}
+
+func (a *Auth) isPermanentLocked() bool { return a.AuthType == "aksk" }
+
+func (a *Auth) validatePermanentLocked() error {
+	if !a.isPermanentLocked() {
+		return nil
+	}
+	for _, field := range []struct{ name, value string }{
+		{"user_id", a.UserID},
+		{"user_name", a.UserName},
+		{"domain_id", a.DomainID},
+		{"access_key_id", a.AccessKeyID},
+		{"secret_access_key", a.SecretAccessKey},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("auth_type aksk requires non-empty %s", field.name)
+		}
+	}
+	return nil
 }
 
 // ClientIDOr 返回该凭证绑定的 OAuth client_id；未记录时返回 fallback。
@@ -131,6 +154,9 @@ func (a *Auth) Token() string {
 func (a *Auth) Refresh() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.isPermanentLocked() {
+		return ""
+	}
 	return a.RefreshToken
 }
 
@@ -152,6 +178,9 @@ func (a *Auth) Credentials() (token, accessKeyID, secretAccessKey string) {
 func (a *Auth) UpdateCredentials(token, accessKeyID, secretAccessKey, expiration, refreshToken string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.isPermanentLocked() {
+		return fmt.Errorf("cannot apply OAuth refresh to permanent AK/SK credentials")
+	}
 	a.CloudDragonTok = token
 	a.AccessKeyID = accessKeyID
 	a.SecretAccessKey = secretAccessKey
@@ -192,19 +221,33 @@ func (a *Auth) SetPathAndSave(path string) error {
 func (a *Auth) ExpiresAt() time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.isPermanentLocked() {
+		return time.Time{}
+	}
 	if t, err := time.Parse(time.RFC3339, a.Expiration); err == nil {
 		return t
 	}
 	return time.Time{}
 }
 
-// Remaining 返回剩余有效期。
-func (a *Auth) Remaining() time.Duration {
-	t := a.ExpiresAt()
-	if t.IsZero() {
-		return 24 * time.Hour
+// remaining 返回有效期和永久类型；最大时长仅代表无到期时间，不写入凭据。
+func (a *Auth) remaining() (time.Duration, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isPermanentLocked() {
+		return permanentRemaining, true
 	}
-	return time.Until(t)
+	t, err := time.Parse(time.RFC3339, a.Expiration)
+	if err != nil || t.IsZero() {
+		return 24 * time.Hour, false
+	}
+	return time.Until(t), false
+}
+
+// Remaining 返回剩余有效期；永久凭据返回可表示的最大时长。
+func (a *Auth) Remaining() time.Duration {
+	r, _ := a.remaining()
+	return r
 }
 
 // Expired 报告 token 是否已过期。
@@ -212,8 +255,8 @@ func (a *Auth) Expired() bool { return a.Remaining() <= 0 }
 
 // ExpiringSoon 报告 token 是否将在 within 内过期。
 func (a *Auth) ExpiringSoon(within time.Duration) bool {
-	r := a.Remaining()
-	return r > 0 && r <= within
+	r, permanent := a.remaining()
+	return !permanent && r > 0 && r <= within
 }
 
 // AccountID 返回账号的稳定标识：优先 user_id，缺失时退化为凭证文件名。
@@ -240,6 +283,9 @@ func (a *Auth) AccountID() string {
 func (a *Auth) Save() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.validatePermanentLocked(); err != nil {
+		return err
+	}
 	return saveLocked(a.path, a)
 }
 
@@ -269,7 +315,10 @@ func LoadDir(dir string) ([]*Auth, error) {
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", e.Name(), err)
 		}
-		if a.CloudDragonTok == "" {
+		if err := a.validatePermanentLocked(); err != nil {
+			return nil, fmt.Errorf("load %s: %w", e.Name(), err)
+		}
+		if !a.isPermanentLocked() && a.CloudDragonTok == "" {
 			continue
 		}
 		a.path = p

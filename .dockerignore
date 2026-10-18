@@ -1,4 +1,16 @@
+# 凭据与运行时数据：绝不进镜像层
 auths
 data
+config.json
+.env
+*.key
+*.pem
+*.backup
+*.bak
+
+# 构建与版本控制
 .git
+.github
+bin
 *.exe
+.gocache

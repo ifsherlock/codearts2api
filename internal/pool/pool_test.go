@@ -83,3 +83,48 @@ func TestRefreshSkewControlsThreshold(t *testing.T) {
 		t.Fatalf("剩余 2h、skew=1h 不应触发刷新: %v", err)
 	}
 }
+
+func TestValidatePermanentCredentialsDoNotExpireOrRefresh(t *testing.T) {
+	for _, expiration := range []string{"", "invalid", "2000-01-01T00:00:00Z", time.Now().Add(time.Minute).Format(time.RFC3339)} {
+		t.Run(expiration, func(t *testing.T) {
+			a := &auth.Auth{
+				AuthType: "aksk", UserID: "synthetic-user", UserName: "synthetic-name", DomainID: "synthetic-domain",
+				AccessKeyID: "synthetic-access-key", SecretAccessKey: "synthetic-secret-key", Expiration: expiration,
+				RefreshToken: "obsolete-synthetic-refresh",
+			}
+			p, err := New([]*auth.Auth{a}, Config{RefreshSkew: time.Duration(1<<63 - 1)}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ok, err := p.Validate(p.Accounts()[0])
+			if err != nil || !ok {
+				t.Fatalf("permanent credential validation failed: ok=%t err=%v", ok, err)
+			}
+			if err := p.CheckAndRefreshTokenWithin(a.UserID, time.Duration(1<<63-1)); err != nil {
+				t.Fatalf("permanent credentials entered proactive refresh: %v", err)
+			}
+			if err := p.RefreshToken(a.UserID); err == nil || err.Error() != "no refresh_token available" {
+				t.Fatalf("manual refresh should stop before OAuth: %v", err)
+			}
+			if p.List()[0]["disabled"] != false {
+				t.Fatal("permanent account was disabled")
+			}
+			token, ak, sk := a.Credentials()
+			if token != "" || ak != "synthetic-access-key" || sk != "synthetic-secret-key" || a.Expiration != expiration {
+				t.Fatal("pool validation mutated permanent credential fields")
+			}
+		})
+	}
+}
+
+func TestValidateExpiredLegacyCredentialsStillDisablesAccount(t *testing.T) {
+	a := auth.New("synthetic-user", "synthetic-name", "synthetic-domain", "synthetic-token", "synthetic-ak", "synthetic-sk", "2000-01-01T00:00:00Z", "", "")
+	p, err := New([]*auth.Auth{a}, Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := p.Validate(p.Accounts()[0])
+	if err != nil || ok || p.List()[0]["disabled"] != true {
+		t.Fatalf("expired legacy behavior changed: ok=%t err=%v", ok, err)
+	}
+}

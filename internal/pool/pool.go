@@ -390,6 +390,8 @@ func (p *Pool) Cooldown(name string, kind CoolKind, dur time.Duration, reason st
 // "consecutive errors"）。上游并发/TPM 排队那类瞬时故障本就不该长期记账。
 const errDecay = 1 * time.Hour
 
+const errConsecutiveMsg = "consecutive errors"
+
 // effectiveErrCountLocked 返回衰减后的错误计数，调用方必须持有 a.mu。
 //
 // 超过 errDecay 未再出错即视为「连续」已中断：计数归零，并顺手清掉由该计数
@@ -411,8 +413,6 @@ func (a *Account) effectiveErrCountLocked(now time.Time) int {
 	}
 	return a.errCount
 }
-
-const errConsecutiveMsg = "consecutive errors"
 
 // NoteError 累计错误。
 func (p *Pool) NoteError(name string, threshold int, cooldown time.Duration) {
