@@ -41,6 +41,7 @@ type Account struct {
 	checkin           *CheckinStatus
 	lastValidated     time.Time
 	errCount          int
+	errLastAt         time.Time // 最近一次累计错误的时刻，用于 errCount 随时间衰减
 	coolUntil         time.Time
 	coolKind          CoolKind
 	disabled          bool
@@ -99,8 +100,8 @@ func New(auths []*auth.Auth, cfg Config, stateFile string) (*Pool, error) {
 	p := &Pool{cfg: cfg, state: stateFile}
 	for _, a := range auths {
 		acct := &Account{
-			Name:              a.UserID,
-			UID:               a.UserID,
+			Name:              a.AccountID(),
+			UID:               a.AccountID(),
 			UserName:          a.UserName,
 			Auth:              a,
 			Client:            upstream.New(120 * time.Second),
@@ -135,8 +136,8 @@ func (p *Pool) Get(name string) *Account {
 // AddAccount 动态添加账号（WebUI 登录成功后调用）。
 func (p *Pool) AddAccount(a *auth.Auth) *Account {
 	acct := &Account{
-		Name:              a.UserID,
-		UID:               a.UserID,
+		Name:              a.AccountID(),
+		UID:               a.AccountID(),
 		UserName:          a.UserName,
 		Auth:              a,
 		Client:            upstream.New(120 * time.Second),
@@ -181,6 +182,8 @@ func (p *Pool) List() []map[string]any {
 		if cooling {
 			until = a.coolUntil.Format(time.RFC3339)
 		}
+		// 展示衰减后的计数：过期记账不该继续挂在面板上。
+		errCount := a.effectiveErrCountLocked(now)
 		reason := a.disabledReason
 		if reason == "" {
 			reason = a.lastErr
@@ -196,7 +199,7 @@ func (p *Pool) List() []map[string]any {
 			"disabled":          a.disabled,
 			"cooling":           cooling,
 			"until":             until,
-			"err_count":         a.errCount,
+			"err_count":         errCount,
 			"reason":            reason,
 			"last_error":        a.lastErr,
 			"active_concurrent": a.activeConcurrent,
@@ -276,18 +279,18 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 	next := make([]*Account, 0, len(auths))
 	for _, a := range auths {
-		if existing, ok := byUID[a.UserID]; ok {
+		if existing, ok := byUID[a.AccountID()]; ok {
 			existing.mu.Lock()
 			existing.Auth = a
 			existing.UserName = a.UserName
 			existing.maxConcurrent = p.cfg.MaxConcurrent
 			existing.mu.Unlock()
 			next = append(next, existing)
-			delete(byUID, a.UserID)
+			delete(byUID, a.AccountID())
 		} else {
 			next = append(next, &Account{
-				Name:              a.UserID,
-				UID:               a.UserID,
+				Name:              a.AccountID(),
+				UID:               a.AccountID(),
 				UserName:          a.UserName,
 				Auth:              a,
 				Client:            upstream.New(120 * time.Second),
@@ -379,6 +382,38 @@ func (p *Pool) Cooldown(name string, kind CoolKind, dur time.Duration, reason st
 	p.saveState()
 }
 
+// errDecay 是错误计数的衰减窗口：距离上次记错超过该时长后，errCount 归零。
+//
+// 原先 errCount 只在 NoteSuccess（该账号真实跑通一次对话）时清零，而选号按
+// p.accounts 顺序，排在前面的健康账号会一直吸走流量，后面的账号长期不接请求，
+// 于是一波瞬时故障攒下的计数会永久钉在面板上（表现为 err 3 + 常驻
+// "consecutive errors"）。上游并发/TPM 排队那类瞬时故障本就不该长期记账。
+const errDecay = 1 * time.Hour
+
+// effectiveErrCountLocked 返回衰减后的错误计数，调用方必须持有 a.mu。
+//
+// 超过 errDecay 未再出错即视为「连续」已中断：计数归零，并顺手清掉由该计数
+// 写入的 lastErr 文案，避免面板继续显示过期的 consecutive errors。冷却已过期的
+// 账号同样归零——coolUntil 一过，那次故障的记账就没有意义了。
+func (a *Account) effectiveErrCountLocked(now time.Time) int {
+	if a.errCount == 0 {
+		return 0
+	}
+	stale := !a.errLastAt.IsZero() && now.Sub(a.errLastAt) > errDecay
+	cooled := !a.coolUntil.IsZero() && now.After(a.coolUntil)
+	if stale || cooled {
+		a.errCount = 0
+		a.errLastAt = time.Time{}
+		if a.lastErr == errConsecutiveMsg && !a.disabled {
+			a.lastErr = ""
+		}
+		return 0
+	}
+	return a.errCount
+}
+
+const errConsecutiveMsg = "consecutive errors"
+
 // NoteError 累计错误。
 func (p *Pool) NoteError(name string, threshold int, cooldown time.Duration) {
 	p.mu.Lock()
@@ -388,10 +423,13 @@ func (p *Pool) NoteError(name string, threshold int, cooldown time.Duration) {
 			continue
 		}
 		a.mu.Lock()
-		a.errCount++
+		now := time.Now()
+		// 先按窗口衰减，再累加：中断已久的「连续」不应与本次错误连坐。
+		a.errCount = a.effectiveErrCountLocked(now) + 1
+		a.errLastAt = now
 		if a.errCount >= threshold {
-			a.coolUntil = time.Now().Add(cooldown)
-			a.lastErr = "consecutive errors"
+			a.coolUntil = now.Add(cooldown)
+			a.lastErr = errConsecutiveMsg
 		}
 		a.mu.Unlock()
 	}
@@ -406,6 +444,10 @@ func (p *Pool) NoteSuccess(name string) {
 		if a.Name == name {
 			a.mu.Lock()
 			a.errCount = 0
+			a.errLastAt = time.Time{}
+			if a.lastErr == errConsecutiveMsg && !a.disabled {
+				a.lastErr = ""
+			}
 			a.mu.Unlock()
 		}
 	}
@@ -913,6 +955,7 @@ func (p *Pool) loadState() {
 	var data []struct {
 		Name      string    `json:"name"`
 		ErrCount  int       `json:"err_count"`
+		ErrLastAt time.Time `json:"err_last_at"`
 		CoolUntil time.Time `json:"cool_until"`
 		Disabled  bool      `json:"disabled"`
 		Reason    string    `json:"reason"`
@@ -926,6 +969,7 @@ func (p *Pool) loadState() {
 			if s.Name == a.Name {
 				a.mu.Lock()
 				a.errCount = s.ErrCount
+				a.errLastAt = s.ErrLastAt
 				a.coolUntil = s.CoolUntil
 				a.disabled = s.Disabled
 				a.disabledReason = s.Reason
@@ -943,6 +987,7 @@ func (p *Pool) saveState() {
 	type entry struct {
 		Name      string    `json:"name"`
 		ErrCount  int       `json:"err_count"`
+		ErrLastAt time.Time `json:"err_last_at,omitempty"`
 		CoolUntil time.Time `json:"cool_until"`
 		Disabled  bool      `json:"disabled"`
 		Reason    string    `json:"reason"`
@@ -953,7 +998,8 @@ func (p *Pool) saveState() {
 		a.mu.Lock()
 		out = append(out, entry{
 			Name:      a.Name,
-			ErrCount:  a.errCount,
+			ErrCount:  a.effectiveErrCountLocked(time.Now()),
+			ErrLastAt: a.errLastAt,
 			CoolUntil: a.coolUntil,
 			Disabled:  a.disabled,
 			Reason:    a.disabledReason,

@@ -52,6 +52,10 @@ type ModelInfo struct {
 // 少带一次头就是一次 404，宁可多带。发现结果只会在此基础上增补。
 var seedBenefitModels = []string{
 	"deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash",
+	// 2026-09-26 补：华为云 CodeArts 限时福利第 4 个模型，实测 benefit=true。
+	// 漏在种子表外时，账号身份缺失（目录未发现）的窗口内会被判成非福利路由，
+	// 上游直接回 InferHub.002002009.404。
+	"deepseek-v4.1-flash",
 }
 
 // 内置模型种子（大小写归一用，不标记福利）。
@@ -298,7 +302,7 @@ func (c *Client) FetchModels(acct *auth.Auth) ([]ModelInfo, error) {
 		SecretAccessKey: acct.SecretAccessKey,
 		SecurityToken:   acct.CloudDragonTok,
 	}
-	accountID := acct.UserID
+	accountID := acct.AccountID()
 	var sets [][]ModelInfo
 	if infos, err := c.fetchAgentModels(cred); err != nil {
 		Log("agent models: %v", err)

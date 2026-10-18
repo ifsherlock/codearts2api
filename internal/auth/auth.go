@@ -216,6 +216,26 @@ func (a *Auth) ExpiringSoon(within time.Duration) bool {
 	return r > 0 && r <= within
 }
 
+// AccountID 返回账号的稳定标识：优先 user_id，缺失时退化为凭证文件名。
+//
+// code 通道（portal 回调只回 code、token 交换不返回身份）会落盘成
+// codearts-unknown.json 且 user_id 为空。账号池、模型目录、可用性缓存全部以该
+// 键索引，空键会让这些机制整体失效：模型目录永远写不进去（setAccountModels
+// 对空键直接 return），福利路由判定退化成种子表，福利模型（如
+// deepseek-v4.1-flash）因缺 maas_type: benefit 头被上游判为未注册而 404。
+// 因此这里兜底成文件名，保证键非空且稳定。
+func (a *Auth) AccountID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.UserID != "" {
+		return a.UserID
+	}
+	if a.path != "" {
+		return "file:" + filepath.Base(a.path)
+	}
+	return ""
+}
+
 // Save 原子写回 auth 文件（0600）。
 func (a *Auth) Save() error {
 	a.mu.Lock()

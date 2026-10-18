@@ -79,6 +79,8 @@ var staticModels = []staticModel{
 	{ID: "deepseek-v4-flash-0731", ContextWindow: 1048576, Benefit: true},
 	{ID: "deepseek-v4-pro-0813", ContextWindow: 1048576, Benefit: true},
 	{ID: "glm-5.3-flash", ContextWindow: 1048576, Benefit: true},
+	// 2026-09-26 补：福利第 4 个模型，实测可用（benefit=true，max_tokens=384000）。
+	{ID: "deepseek-v4.1-flash", ContextWindow: 1000000, Benefit: true},
 }
 
 const (
